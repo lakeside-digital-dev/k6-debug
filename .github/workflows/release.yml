@@ -23,11 +23,11 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "20"
       - name: Preprocessor tests + bundle is up to date
@@ -52,24 +52,24 @@ jobs:
           - { os: darwin, arch: arm64 }
           - { os: windows, arch: amd64, ext: .exe }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: Install xk6
         run: go install go.k6.io/xk6/cmd/xk6@${{ env.XK6_VERSION }}
-      - name: Build k6 ${{ env.K6_VERSION }} + k6-debug
+      - name: Build k6 ${{ env.K6_VERSION }} + k6-debug (xk6 reads K6_VERSION)
         env:
           CGO_ENABLED: "0"
         run: |
-          xk6 build ${{ env.K6_VERSION }} \
+          xk6 build \
             --os ${{ matrix.os }} --arch ${{ matrix.arch }} \
             --with github.com/${{ github.repository }}=. \
             --output dist/k6-debug-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}
       - name: DAP smoke test
         if: matrix.os == 'linux' && matrix.arch == 'amd64'
         run: python3 test/dap_smoke_test.py dist/k6-debug-linux-amd64
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: k6-debug-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/*
@@ -81,8 +81,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
         with:
           pattern: k6-debug-*
           merge-multiple: true
