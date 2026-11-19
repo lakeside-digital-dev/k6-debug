@@ -2,6 +2,7 @@ name: Release
 
 # Builds k6 (pinned) + this extension with xk6 for all supported platforms and
 # publishes a GitHub release tagged v<k6-version>-<n> with SHA256SUMS.
+# Run: gh workflow run release.yml -f revision=<n>
 on:
   workflow_dispatch:
     inputs:
