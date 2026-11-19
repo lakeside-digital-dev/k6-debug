@@ -62,6 +62,7 @@ jobs:
         env:
           CGO_ENABLED: "0"
         run: |
+          mkdir -p dist
           xk6 build \
             --os ${{ matrix.os }} --arch ${{ matrix.arch }} \
             --with github.com/${{ github.repository }}=. \
