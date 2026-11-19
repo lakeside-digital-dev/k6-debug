@@ -132,4 +132,35 @@ export default function() {
   console.log('PASS: multiple declarations');
 })();
 
+// Test 8: Function parameters are captured (setup() data)
+(function testParamCapture() {
+  const code = `export default function (data, { a, b = 1 }, ...rest) { const x = data.token; }`;
+  const result = transform(code);
+  for (const n of ['data', 'a', 'b', 'rest']) {
+    assert(result.includes(`name: "${n}"`), 'should capture param ' + n);
+  }
+  assert(result.indexOf('name: "data"') < result.indexOf('name: "x"'), 'params before body vars');
+  console.log('PASS: parameter capture');
+})();
+
+// Test 9: TypeScript input keeps types and is instrumented
+(function testTypeScript() {
+  const { instrument } = require('./instrument');
+  const code = [
+    "import http from 'k6/http';",
+    'interface Data { token: string }',
+    'export default function (data: Data): void {',
+    '  const res = http.get(`x?t=${data.token}`) as any;',
+    '  debugger;',
+    '}',
+  ].join('\n');
+  const result = instrument(code, '/abs/smoke.ts');
+  assert(result.includes('interface Data'), 'should keep TS types');
+  assert(result.includes('name: "data"'), 'should capture typed param');
+  assert(result.includes('breakpoint('), 'should replace debugger');
+  assert(result.includes('breakpoint({ line: 5,'), 'breakpoint keeps source line');
+  assert(result.split('\n').length === code.split('\n').length, 'line count retained');
+  console.log('PASS: typescript');
+})();
+
 console.log('\nAll tests passed!');

@@ -6,8 +6,17 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"sync"
 )
+
+var verbose = os.Getenv("K6_DEBUG_VERBOSE") != ""
+
+func verbosef(format string, args ...any) {
+	if verbose {
+		log.Printf(format, args...)
+	}
+}
 
 // BreakpointManagerInterface defines the methods the DAP server needs from the breakpoint manager.
 type BreakpointManagerInterface interface {
@@ -73,13 +82,15 @@ func (s *Server) Start() error {
 	}
 	defer ln.Close()
 
-	log.Printf("[k6-debug] DAP server listening on %s", s.addr)
+	// Stable, machine-readable line: IDEs wait for it before connecting.
+	// With K6_DEBUG_DAP=127.0.0.1:0 the OS picks a free port, printed here.
+	fmt.Fprintf(os.Stderr, "[k6-debug] DAP server listening on %s\n", ln.Addr())
 
 	conn, err := ln.Accept()
 	if err != nil {
 		return fmt.Errorf("DAP server accept error: %w", err)
 	}
-	log.Printf("[k6-debug] DAP client connected from %s", conn.RemoteAddr())
+	verbosef("[k6-debug] DAP client connected from %s", conn.RemoteAddr())
 
 	s.mu.Lock()
 	s.conn = conn
@@ -92,20 +103,26 @@ func (s *Server) Start() error {
 
 func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
+	// If the IDE goes away without a disconnect request, never leave VUs
+	// blocked: unblock WaitForClient and resume everything.
+	defer func() {
+		s.SignalReady()
+		s.handler.bpm.SetDisconnected()
+	}()
 	reader := bufio.NewReader(conn)
 
 	for {
 		msg, err := readMessage(reader)
 		if err != nil {
 			if err == io.EOF {
-				log.Printf("[k6-debug] DAP client disconnected")
+				verbosef("[k6-debug] DAP client disconnected")
 			} else {
 				log.Printf("[k6-debug] DAP read error: %v", err)
 			}
 			return
 		}
 
-		log.Printf("[k6-debug] DAP recv: type=%s command=%s seq=%d args=%s", msg.Type, msg.Command, msg.Seq, msg.Arguments)
+		verbosef("[k6-debug] DAP recv: type=%s command=%s seq=%d args=%s", msg.Type, msg.Command, msg.Seq, msg.Arguments)
 
 		response := s.handler.HandleMessage(msg)
 		if response != nil {

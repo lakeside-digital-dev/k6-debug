@@ -1,316 +1,90 @@
-# xk6-debug
+# k6-debug
 
-A k6 extension for debugging JavaScript test scripts. Inspect variables and pause at breakpoints while your k6 script runs — in the terminal or with full VS Code/Cursor IDE integration.
+A k6 binary with a built-in debugger (Debug Adapter Protocol server) for k6
+test scripts written in JavaScript or TypeScript: breakpoints, variables
+(including the `setup()` data), step over / into / out.
 
-## Getting Started
+It is used by the **k6 Load Testing** plugin for JetBrains IDEs, which
+downloads the matching binary from this repository's releases. It can be used
+with any DAP client.
 
-This walkthrough takes you from zero to a working debug session. You will:
+This project is a fork of [nhancdt2602/xk6-debug](https://github.com/nhancdt2602/xk6-debug)
+(MIT, see [LICENSE](LICENSE)). Thanks to its author for the original
+extension. Changes in this fork:
 
-1. Build a custom k6 binary with the debug extension
-2. Write a simple k6 script with a `debugger` statement
-3. Preprocess the script (one command)
-4. Run it and see variable values printed to your terminal
+- TypeScript scripts (`.ts`, `.mts`, `.cts`) are instrumented; types are kept and stripped by k6.
+- Function parameters are captured, so `data` returned by `setup()` is visible.
+- Instrumentation runs inside the binary (Babel bundled and executed with sobek) — no Node.js needed.
+- Step over respects the call depth; step in / step out added; stopped events carry `step`/`breakpoint`.
+- `evaluate` for variable names and property paths (`data.user.id`, `res.headers["Content-Type"]`).
+- `K6_DEBUG_DAP=127.0.0.1:0` picks a free port and prints it; VUs resume if the client goes away.
+- Release binaries for linux/darwin (amd64, arm64) and windows (amd64), with `SHA256SUMS`.
 
-### Prerequisites
+Not affiliated with or endorsed by Grafana Labs. k6 is a trademark of Grafana Labs.
 
-- Go 1.25+
-- Node.js 18+
-- A local HTTP server on port 8000 (any will do — `python3 -m http.server 8000` works)
+## License and source
 
-### Step 1: Build the custom k6 binary
+- The extension code in this repository is MIT licensed ([LICENSE](LICENSE)).
+- **k6 is AGPL-3.0; this binary bundles k6, source here:**
+  [github.com/grafana/k6](https://github.com/grafana/k6) (each release names the exact k6 tag;
+  current: [v2.4.0](https://github.com/grafana/k6/tree/v2.4.0)). The binaries are built
+  unmodified from that tag plus this repository by the [release workflow](.github/workflows/release.yml).
 
-From the `xk6-debug/` directory:
-
-```bash
-go build -o k6-debug ./cmd/k6debug/
-```
-
-This produces a `./k6-debug` binary with the debug extension built in.
-
-### Step 2: Write a test script
-
-Create a file called `script.js`:
-
-```js
-import http from 'k6/http';
-
-export const options = {
-  vus: 1,
-  iterations: 1,
-};
-
-export default function () {
-  let resp = http.get('http://localhost:8000');
-  debugger;
-  let status = resp.status;
-  let body = resp.body;
-}
-```
-
-The `debugger` statement is the key part. It tells the debugger to pause execution at that line, just like it would in a browser.
-
-### Step 3: Preprocess the script
-
-The preprocessor rewrites your script to add debug hooks. Run it once before each debug session:
+## Usage
 
 ```bash
-# Install dependencies (first time only)
-cd preprocessor && npm install && cd ..
-
-# Preprocess
-./preprocessor/bin/k6-debug-preprocess script.js -o /tmp/debug_script.js
+K6_DEBUG_DAP=127.0.0.1:0 k6-debug run script.ts
+# stderr: [k6-debug] DAP server listening on 127.0.0.1:41234
 ```
 
-The preprocessor:
-- Injects `import { capture, breakpoint, enterScope } from 'k6/x/debug'`
-- Inserts `capture()` after each variable assignment to record values
-- Replaces `debugger` statements with `breakpoint()` calls
-- Injects `enterScope()` at the top of each function/block to track variable scoping
-- Tags each instrumented call with its lexical scope ID so the debugger only shows in-scope variables
+Connect a DAP client to the printed port (TCP, `Content-Length` framing), send
+`initialize`, `attach`, `setBreakpoints` (absolute path of the original
+script), `configurationDone`. VUs wait until `configurationDone`.
 
-### Step 4: Start a local server
+The script is instrumented automatically: an instrumented copy
+`.<name>.k6debug.<ext>` is written next to it (so relative imports and `open()`
+work) and deleted as soon as k6 has loaded it. Only the main script is
+instrumented; breakpoints in imported local modules are not supported.
 
-Open a separate terminal and start any HTTP server:
+Environment variables:
 
-```bash
-python3 -m http.server 8000
-```
-
-### Step 5: Run the script
-
-```bash
-K6_AUTO_EXTENSION_RESOLUTION=false ./k6-debug run /tmp/debug_script.js
-```
-
-### What you should see
-
-After the HTTP request completes, two things happen:
-
-**Variable captures appear on stderr.** Each captured variable prints as a JSON line:
-
-```json
-{"type":"capture","vu":1,"file":"script.js","line":9,"col":6,"name":"resp","value":{ ... }}
-```
-
-You will see captures for `resp`, `status`, and `body` — showing their values at the moment they were assigned.
-
-**The script pauses at `debugger`.** The terminal prints:
-
-```
-[k6-debug] Breakpoint hit at script.js:10 (VU #1). Press Enter to continue...
-```
-
-The VU is frozen. No more code runs until you press Enter. This is how you know the debugger is working — the script stops exactly where you placed `debugger`, and you can see the variables that were captured before that point.
-
-Press Enter to resume. The remaining variables (`status`, `body`) are captured and the script finishes normally.
-
----
-
-## VS Code / Cursor IDE Integration (DAP mode)
-
-For a full IDE debugging experience with breakpoints, stepping, and variable inspection. The extension handles instrumentation, launching, and attaching automatically.
-
-### Step 1: Install the VS Code extension
-
-```bash
-cd vscode/k6-debug-extension
-npm install && npm run package
-```
-
-Then install the `.vsix` file:
-- **VS Code**: `code --install-extension k6-debug-0.1.0.vsix`
-- **Cursor**: `cursor --install-extension k6-debug-0.1.0.vsix`
-
-### Step 2: Configure launch.json
-
-Add this to your `.vscode/launch.json`:
-
-```json
-{
-  "version": "0.2.0",
-  "configurations": [
-    {
-      "name": "Debug k6 Script",
-      "type": "k6",
-      "request": "launch",
-      "program": "${file}"
-    }
-  ]
-}
-```
-
-> **Tip**: Open any k6 script and press F5 — VS Code will offer to create this configuration automatically.
-
-### Step 3: Press F5
-
-Open your **original** k6 script (no preprocessing needed) and press F5. The extension will:
-
-1. Instrument the script automatically
-2. Find a free port
-3. Start `k6-debug` with the DAP server
-4. Attach the debugger once the server is ready
-
-Set breakpoints by clicking in the gutter before or after pressing F5.
-
-- When a breakpoint is hit, the editor highlights the paused line
-- The Variables panel shows captured variables — only those in scope at the pause point
-- Variables appear in source order and stale values from previous iterations are automatically cleared
-
-### Configuration
-
-| Setting | Description | Default |
-|---|---|---|
-| `k6debug.binaryPath` | Path to the `k6-debug` binary | Auto-detect (workspace root, then PATH) |
-
-To set a custom binary path, add to your VS Code settings:
-
-```json
-{
-  "k6debug.binaryPath": "/path/to/k6-debug"
-}
-```
-
-To pass extra k6 flags (e.g. change VU count):
-
-```json
-{
-  "name": "Debug k6 Script",
-  "type": "k6",
-  "request": "launch",
-  "program": "${file}",
-  "k6Args": ["--vus", "2", "--iterations", "5"]
-}
-```
-
-### Attach mode (advanced)
-
-If you prefer to start k6 manually and attach separately:
-
-```bash
-K6_DEBUG_DAP=:4711 K6_AUTO_EXTENSION_RESOLUTION=false ./k6-debug run /tmp/debug_script.js
-```
-
-```json
-{
-  "name": "Attach to k6 debugger",
-  "type": "k6",
-  "request": "attach",
-  "port": 4711
-}
-```
-
-### Debugger controls
-
-| Button | Action |
+| Variable | Meaning |
 |---|---|
-| **Continue** (F5) | Resumes all VUs until the next breakpoint |
-| **Step Over** (F10) | Steps to the next line in the current VU; other VUs stay frozen |
-| **Disconnect** / **Stop** | Resumes all VUs, kills k6, and ends the debug session |
+| `K6_DEBUG_DAP` | `host:port` for the DAP server (`127.0.0.1:0` = free port). Without it, `k6-debug` behaves like k6 (plus the CLI mode of the original extension). |
+| `K6_DEBUG_NO_INSTRUMENT` | Run the script as given (already instrumented). |
+| `K6_DEBUG_KEEP` | Keep the instrumented copy. |
+| `K6_DEBUG_VERBOSE` | Log DAP traffic and line hooks to stderr. |
 
-### Multi-VU debugging
+Supported requests: `initialize`, `attach`/`launch`, `setBreakpoints`,
+`configurationDone`, `threads` (one per VU), `stackTrace` (one frame),
+`scopes`, `variables`, `evaluate` (paths only), `continue`, `next`, `stepIn`,
+`stepOut`, `source`, `disconnect`. Not supported: conditional breakpoints,
+arbitrary expressions, multiple stack frames, breakpoints in imported files.
 
-When running with multiple VUs (`vus: 2` or more), the debugger uses all-stop mode:
-- When one VU hits a breakpoint, all other VUs are frozen
-- **Continue** resumes all VUs
-- **Step Over** resumes only the active VU — others remain frozen until Continue
-- Each VU appears as a separate thread in the Call Stack panel
+## Build
 
-### Troubleshooting
-
-- **Nothing happens on F5**: Check the "k6 Debug" output channel in VS Code for error details.
-- **Binary not found**: Set `k6debug.binaryPath` in VS Code settings to the full path of your `k6-debug` binary.
-- **Port conflict**: The extension picks a random free port automatically — no manual port management needed in launch mode.
-- **Breakpoints not hitting**: Ensure `launch.json` uses `"request": "launch"` (not `"attach"`) so the extension instruments the script. Raw uninstrumented scripts won't trigger the debugger.
-- **HTTP requests failing**: Make sure any server your script needs is running before pressing F5.
-
----
-
-## How it works
-
-The preprocessor transforms your script before k6 runs it:
-
-**Your code:**
-```js
-let resp = http.get('http://localhost:8000');
-debugger;
-let status = resp.status;
-```
-
-**After preprocessing:**
-```js
-import { capture, breakpoint, enterScope } from 'k6/x/debug';
-
-export default function() {
-  enterScope(1, 0);
-  let resp = http.get('http://localhost:8000');
-  capture({ line: 9, col: 6, name: "resp", file: "script.js", scope: 1 }, resp);
-  breakpoint({ line: 10, col: 2, file: "script.js", scope: 1 });
-  let status = resp.status;
-  capture({ line: 11, col: 6, name: "status", file: "script.js", scope: 1 }, status);
-}
-```
-
-- `enterScope(id, parentId)` registers a lexical scope and clears stale variables from previous entries
-- `capture()` records a variable's value right after assignment, tagged with its scope
-- `breakpoint()` replaces `debugger` and pauses execution
-
-### Variable scoping
-
-The debugger tracks lexical scopes from the AST:
-
-- **Global scope (0)**: top-level variables like `options` — always visible, never cleared
-- **Function scope**: variables like `resp`, `status` — visible inside the function, cleared on each new iteration
-- **Block scope**: variables in `if`/`for`/`while` blocks — visible only when paused inside that block, cleared on re-entry
-
-When paused, only variables whose scope is an ancestor of the current pause point are shown. This prevents confusion from stale variables that are no longer in scope.
-
----
-
-## Reference
-
-### Preprocessor CLI
-
-```
-k6-debug-preprocess <input.js> [-o output.js] [--source-maps]
-```
-
-| Flag | Description |
-|---|---|
-| `-o <file>` | Write output to a file instead of stdout |
-| `--source-maps` | Embed an inline source map in the output |
-
-### Environment variables
-
-| Variable | Description |
-|---|---|
-| `K6_DEBUG_DAP` | Set to a `host:port` (e.g. `:4711`) to start the DAP server. Omit for CLI-only mode. |
-| `K6_AUTO_EXTENSION_RESOLUTION` | Set to `false` to prevent k6 from trying to auto-resolve the debug extension. |
-
-### DAP commands supported
-
-| Command | What it does |
-|---|---|
-| initialize | Returns debugger capabilities |
-| launch/attach | Acknowledges the debug session |
-| setBreakpoints | Sets breakpoints by file and line |
-| configurationDone | Signals the IDE is ready; unblocks VU execution |
-| threads | Lists VUs as threads |
-| stackTrace | Returns the current pause location with VU identity |
-| scopes | Returns a "Local Variables" scope |
-| variables | Returns in-scope captured variables in source order |
-| continue | Resumes all VUs until next breakpoint |
-| next | Steps one line in the active VU; others stay frozen |
-| source | Returns file contents for the IDE |
-| disconnect | Resumes all VUs and closes the debug session |
-
-### Running tests
+Requires Go 1.26+ and [xk6](https://github.com/grafana/xk6) v1.5+:
 
 ```bash
-# Go unit tests
-cd xk6-debug/
-go test -race ./...
-
-# Preprocessor tests
-cd preprocessor/
-node src/plugin.test.js
+go install go.k6.io/xk6/cmd/xk6@v1.5.1
+xk6 build v2.4.0 --with github.com/lakeside-digital-dev/k6-debug=. --output k6-debug
 ```
+
+Alternatively `go build -o k6-debug ./cmd/k6debug` (uses the k6 version in `go.mod`).
+
+The embedded instrumenter `instrument/bundle.js` is generated from
+`preprocessor/` (Node.js only needed for this step):
+
+```bash
+cd preprocessor && npm ci --ignore-scripts && npm test && npm run bundle
+```
+
+Tests:
+
+```bash
+go test ./...
+python3 test/dap_smoke_test.py ./k6-debug   # end-to-end DAP session on test/smoke.ts
+```
+
+Releases are created by the `Release` workflow (manual dispatch) with tag
+`v<k6-version>-<n>` and assets `k6-debug-<os>-<arch>[.exe]` + `SHA256SUMS`.

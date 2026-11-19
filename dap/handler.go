@@ -6,6 +6,9 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/grafana/sobek"
@@ -32,6 +35,7 @@ type VUState struct {
 	Paused    bool
 	PauseLine int
 	PauseFile string
+	PauseFunc string
 	Variables []OrderedVar
 }
 
@@ -46,6 +50,8 @@ type Handler struct {
 	// ActionContinue, ActionNext, ActionStepIn constants matching breakpoint.go
 	actionContinue int
 	actionNext     int
+	actionStepIn   int
+	actionStepOut  int
 
 	// scriptDir is the working directory, used to resolve relative file paths.
 	scriptDir string
@@ -60,6 +66,8 @@ func NewHandler(bpm BPManager) *Handler {
 		vuScopes:       make(map[uint64]int),
 		actionContinue: 0,
 		actionNext:     1,
+		actionStepIn:   2,
+		actionStepOut:  3,
 		scriptDir:      cwd,
 	}
 }
@@ -98,7 +106,13 @@ func (h *Handler) HandleMessage(msg *Message) []*Message {
 	case "continue":
 		return h.handleContinue(msg)
 	case "next":
-		return h.handleNext(msg)
+		return h.handleStep(msg, h.actionNext)
+	case "stepIn":
+		return h.handleStep(msg, h.actionStepIn)
+	case "stepOut":
+		return h.handleStep(msg, h.actionStepOut)
+	case "evaluate":
+		return h.handleEvaluate(msg)
 	case "source":
 		return h.handleSource(msg)
 	case "disconnect":
@@ -113,10 +127,7 @@ func (h *Handler) HandleMessage(msg *Message) []*Message {
 		"setDataBreakpoints",
 		"setInstructionBreakpoints",
 		"pause",
-		"evaluate",
 		"completions",
-		"stepIn",
-		"stepOut",
 		"reverseContinue",
 		"restartFrame",
 		"goto",
@@ -125,11 +136,11 @@ func (h *Handler) HandleMessage(msg *Message) []*Message {
 		"writeMemory",
 		"cancel",
 		"breakpointLocations":
-		log.Printf("[k6-debug] Acknowledged DAP command: %s", msg.Command)
+		verbosef("[k6-debug] Acknowledged DAP command: %s", msg.Command)
 		return []*Message{NewResponse(msg, map[string]any{})}
 
 	default:
-		log.Printf("[k6-debug] Unhandled DAP command: %s", msg.Command)
+		verbosef("[k6-debug] Unhandled DAP command: %s", msg.Command)
 		return []*Message{NewResponse(msg, map[string]any{})}
 	}
 }
@@ -138,6 +149,8 @@ func (h *Handler) handleInitialize(msg *Message) []*Message {
 	resp := NewResponse(msg, Capabilities{
 		SupportsConfigurationDoneRequest: true,
 		SupportsFunctionBreakpoints:      false,
+		SupportsEvaluateForHovers:        true,
+		SupportsTerminateRequest:         false,
 	})
 	initialized := NewEvent("initialized", nil)
 	return []*Message{resp, initialized}
@@ -240,7 +253,7 @@ func (h *Handler) handleStackTrace(msg *Message) []*Message {
 		frames = []StackFrame{
 			{
 				ID:   args.ThreadID,
-				Name: fmt.Sprintf("VU #%d", vuID),
+				Name: frameName(state.PauseFunc, vuID),
 				Source: Source{
 					Name: filepath.Base(state.PauseFile),
 					Path: absPath,
@@ -359,23 +372,24 @@ func (h *Handler) handleContinue(msg *Message) []*Message {
 	return []*Message{NewResponse(msg, body)}
 }
 
-func (h *Handler) handleNext(msg *Message) []*Message {
+// handleStep implements next (step over), stepIn and stepOut.
+func (h *Handler) handleStep(msg *Message, action int) []*Message {
 	var args NextArguments
 	if err := json.Unmarshal(msg.Arguments, &args); err != nil {
-		return []*Message{NewErrorResponse(msg, "invalid next arguments")}
+		return []*Message{NewErrorResponse(msg, "invalid "+msg.Command+" arguments")}
 	}
 
 	h.varRefs.Clear()
 
-	// Tell VS Code all threads continued so it clears all pause highlights.
+	// Tell the IDE all threads continued so it clears all pause highlights.
 	// When the stepping thread stops again, only its highlight will appear.
 	continued := NewEvent("continued", ContinuedEventBody{
 		ThreadID:            args.ThreadID,
 		AllThreadsContinued: true,
 	})
 
-	// Next resumes ONLY the active thread — others stay frozen.
-	h.bpm.Resume(uint64(args.ThreadID), h.actionNext)
+	// Stepping resumes ONLY the active thread — others stay frozen.
+	h.bpm.Resume(uint64(args.ThreadID), action)
 
 	return []*Message{NewResponse(msg, nil), continued}
 }
@@ -391,14 +405,18 @@ func (h *Handler) handleDisconnect(msg *Message) []*Message {
 }
 
 // SendStoppedEvent sends a stopped event to the IDE.
-func (h *Handler) SendStoppedEvent(vuID uint64) {
+func (h *Handler) SendStoppedEvent(vuID uint64, reason string) {
 	if h.server == nil {
 		return
 	}
-	log.Printf("[k6-debug] Sending stopped event for VU #%d", vuID)
+	if reason == "" {
+		reason = "breakpoint"
+	}
+	verbosef("[k6-debug] Sending stopped event for VU #%d (%s)", vuID, reason)
 	event := NewEvent("stopped", StoppedEventBody{
-		Reason:   "breakpoint",
-		ThreadID: int(vuID),
+		Reason:            reason,
+		ThreadID:          int(vuID),
+		AllThreadsStopped: true,
 	})
 	if err := h.server.SendEvent(event); err != nil {
 		log.Printf("[k6-debug] Failed to send stopped event: %v", err)
@@ -438,6 +456,22 @@ func formatValue(v sobek.Value) string {
 	if _, isFunc := sobek.AssertFunction(v); isFunc {
 		return "[Function]"
 	}
+	if obj, ok := v.(*sobek.Object); ok {
+		switch cls := obj.ClassName(); cls {
+		case "Object", "Array":
+			if data, err := obj.MarshalJSON(); err == nil {
+				const maxPreview = 200
+				preview := string(data)
+				if len(preview) > maxPreview {
+					preview = preview[:maxPreview] + "…"
+				}
+				return preview
+			}
+		}
+	}
+	if s, ok := v.Export().(string); ok {
+		return strconv.Quote(s)
+	}
 	return v.String()
 }
 
@@ -454,5 +488,82 @@ func valueType(v sobek.Value) string {
 	if obj, ok := v.(*sobek.Object); ok {
 		return obj.ClassName()
 	}
-	return "string"
+	switch v.Export().(type) {
+	case int64, float64:
+		return "number"
+	case bool:
+		return "boolean"
+	case string:
+		return "string"
+	}
+	return "unknown"
+}
+
+// frameName names the single stack frame: the JS function plus the VU.
+func frameName(fn string, vuID uint64) string {
+	if fn == "" {
+		return fmt.Sprintf("VU #%d", vuID)
+	}
+	return fmt.Sprintf("%s (VU #%d)", fn, vuID)
+}
+
+// evalPath matches the supported evaluate syntax: a captured variable name
+// followed by property accesses, e.g. `res.status`, `data.users[0]["id"]`.
+var (
+	evalHead = regexp.MustCompile(`^\s*([A-Za-z_$][\w$]*)`)
+	evalStep = regexp.MustCompile(`^(?:\.([A-Za-z_$][\w$]*)|\[\s*(\d+)\s*\]|\[\s*"([^"]*)"\s*\]|\[\s*'([^']*)'\s*\])`)
+)
+
+// handleEvaluate resolves variable names and property paths against the
+// variables visible at the pause point. Arbitrary JS expressions are not
+// executed (the VU runtime is blocked on another goroutine).
+func (h *Handler) handleEvaluate(msg *Message) []*Message {
+	var args EvaluateArguments
+	if err := json.Unmarshal(msg.Arguments, &args); err != nil {
+		return []*Message{NewErrorResponse(msg, "invalid evaluate arguments")}
+	}
+	expr := strings.TrimSpace(args.Expression)
+	head := evalHead.FindStringSubmatch(expr)
+	if head == nil {
+		return []*Message{NewErrorResponse(msg, "only variable names and property paths are supported")}
+	}
+
+	state := h.bpm.GetVUState(uint64(args.FrameID))
+	if !state.Paused {
+		return []*Message{NewErrorResponse(msg, "VU is not paused")}
+	}
+	var value sobek.Value
+	found := false
+	for _, ov := range state.Variables {
+		if ov.Name == head[1] {
+			value, found = ov.Value, true
+		}
+	}
+	if !found {
+		return []*Message{NewErrorResponse(msg, fmt.Sprintf("%s is not available here", head[1]))}
+	}
+
+	rest := expr[len(head[0]):]
+	for strings.TrimSpace(rest) != "" {
+		rest = strings.TrimLeft(rest, " \t")
+		m := evalStep.FindStringSubmatch(rest)
+		if m == nil {
+			return []*Message{NewErrorResponse(msg, "only variable names and property paths are supported")}
+		}
+		key := m[1] + m[2] + m[3] + m[4]
+		obj, ok := value.(*sobek.Object)
+		if !ok {
+			return []*Message{NewErrorResponse(msg, fmt.Sprintf("cannot read %q of %s", key, formatValue(value)))}
+		}
+		value = obj.Get(key)
+		rest = rest[len(m[0]):]
+	}
+
+	body := EvaluateBody{Result: formatValue(value), Type: valueType(value)}
+	if obj, ok := value.(*sobek.Object); ok {
+		if _, isFunc := sobek.AssertFunction(value); !isFunc {
+			body.VariablesReference = h.varRefs.Add(obj)
+		}
+	}
+	return []*Message{NewResponse(msg, body)}
 }

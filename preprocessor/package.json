@@ -1,14 +1,23 @@
 {
   "name": "k6-debug-preprocess",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "private": true,
   "description": "Babel preprocessor for k6 debug instrumentation",
+  "license": "MIT",
   "bin": {
     "k6-debug-preprocess": "./bin/k6-debug-preprocess"
+  },
+  "scripts": {
+    "test": "node src/plugin.test.js",
+    "bundle": "esbuild src/embed-entry.js --bundle --minify --platform=browser --format=iife --target=es2017 --define:process.env.NODE_ENV='\"production\"' --define:process.env.BABEL_TYPES_8_BREAKING=false --legal-comments=eof --outfile=../instrument/bundle.js"
   },
   "dependencies": {
     "@babel/generator": "^7",
     "@babel/parser": "^7",
     "@babel/traverse": "^7",
     "@babel/types": "^7"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12"
   }
 }

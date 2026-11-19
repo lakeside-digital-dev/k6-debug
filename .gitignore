@@ -1,23 +1,17 @@
 # Build output
-k6-debug
-k6-debug.exe
+/k6-debug
+/k6-debug.exe
+/k6
+/dist/
 /cmd/k6debug/k6-debug
 
-# Preprocessed test scripts
-/tmp/
+# Instrumented temp copies (normally deleted automatically)
+.*.k6debug.*
 *.debug.js
 
 # Node
 node_modules/
 npm-debug.log*
-
-# VS Code extension build artifacts
-vscode/k6-debug-extension/*.vsix
-vscode/k6-debug-extension/bin/
-vscode/k6-debug-extension/LICENSE
-
-# Built vsix packages
-dist/
 
 # Go
 *.test

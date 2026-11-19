@@ -11,10 +11,11 @@
 package debug
 
 import (
+	"fmt"
 	"os"
 	"sync"
 
-	"github.com/nhancdt2602/xk6-debug/dap"
+	"github.com/lakeside-digital-dev/k6-debug/dap"
 	"go.k6.io/k6/v2/js/modules"
 )
 
@@ -38,6 +39,8 @@ func New() *RootModule {
 // NewModuleInstance creates a per-VU module instance.
 func (rm *RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
 	rm.once.Do(func() {
+		// k6 has read the (instrumented) main script by now; drop the temp copy.
+		removeInstrumentedCopy()
 		rm.bpm = NewBreakpointManager()
 
 		if addr := os.Getenv("K6_DEBUG_DAP"); addr != "" {
@@ -46,14 +49,19 @@ func (rm *RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
 			rm.dapServer = dap.NewServer(addr, rm.handler)
 
 			// Wire DAP events
-			rm.bpm.SetOnStopped(func(vuID uint64, file string, line int) {
-				rm.handler.SendStoppedEvent(vuID)
+			rm.bpm.SetOnStopped(func(vuID uint64, file string, line int, reason string) {
+				rm.handler.SendStoppedEvent(vuID, reason)
 			})
 			rm.bpm.SetOnThread(func(vuID uint64, reason string) {
 				rm.handler.SendThreadEvent(vuID, reason)
 			})
 
-			go rm.dapServer.Start() //nolint:errcheck
+			go func() {
+				if err := rm.dapServer.Start(); err != nil {
+					fmt.Fprintf(os.Stderr, "[k6-debug] %v\n", err)
+					os.Exit(1)
+				}
+			}()
 		} else {
 			go rm.bpm.ListenStdinResume()
 		}
@@ -106,6 +114,7 @@ func (a *bpmAdapter) GetVUState(vuID uint64) dap.VUState {
 		Paused:    state.Paused,
 		PauseLine: state.PauseLine,
 		PauseFile: state.PauseFile,
+		PauseFunc: state.PauseFunc,
 		Variables: vars,
 	}
 }

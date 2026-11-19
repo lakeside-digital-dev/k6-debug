@@ -7,7 +7,7 @@ import (
 	"os"
 
 	"github.com/grafana/sobek"
-	"github.com/nhancdt2602/xk6-debug/dap"
+	"github.com/lakeside-digital-dev/k6-debug/dap"
 	"go.k6.io/k6/v2/js/modules"
 )
 
@@ -84,21 +84,51 @@ func (mi *ModuleInstance) Line(location sobek.Value) {
 	file := locObj.Get("file").String()
 	scopeID := int(locObj.Get("scope").ToInteger())
 
+	depth, fn := callDepth(rt)
 	steppingOverCurrentLine := mi.bpm.IsSteppingOver(mi.vuID, line)
-	isStepping := mi.bpm.ShouldStepPause(mi.vuID, line)
+	isStepping := mi.bpm.ShouldStepPauseAt(mi.vuID, line, depth)
 	isPrimary := isStepping || (!steppingOverCurrentLine && mi.bpm.IsSet(file, line))
 	isSecondary := !steppingOverCurrentLine && mi.bpm.ShouldPauseAll(mi.vuID)
 
-	log.Printf("[k6-debug] VU#%d line=%d file=%s scope=%d isStepping=%v isPrimary=%v isSecondary=%v steppingOver=%v",
+	verbosef("[k6-debug] VU#%d line=%d file=%s scope=%d isStepping=%v isPrimary=%v isSecondary=%v steppingOver=%v",
 		mi.vuID, line, file, scopeID, isStepping, isPrimary, isSecondary, steppingOverCurrentLine)
 
 	if isPrimary || isSecondary {
 		if isPrimary {
 			mi.bpm.RequestPauseAll()
 		}
-		mi.bpm.Pause(mi.vu.Context(), mi.vuID, file, line, scopeID, isPrimary)
+		reason := "breakpoint"
+		if isStepping {
+			reason = "step"
+		} else if !isPrimary {
+			reason = "pause"
+		}
+		mi.bpm.PauseAt(mi.vu.Context(), mi.vuID, PausePoint{
+			File: file, Line: line, Scope: scopeID, Depth: depth, Func: fn, Reason: reason,
+		}, isPrimary)
 	}
 }
+
+// callDepth returns the JS call stack depth and the innermost JS function name.
+func callDepth(rt *sobek.Runtime) (int, string) {
+	frames := rt.CaptureCallStack(0, nil)
+	name := ""
+	for _, f := range frames {
+		if n := f.FuncName(); n != "" && f.SrcName() != "<native>" {
+			name = n
+			break
+		}
+	}
+	return len(frames), name
+}
+
+func verbosef(format string, args ...any) {
+	if verbose {
+		log.Printf(format, args...)
+	}
+}
+
+var verbose = os.Getenv("K6_DEBUG_VERBOSE") != ""
 
 // Capture is called after each instrumented variable assignment.
 // It only stores the variable value — all pause logic is handled by Line().
@@ -163,5 +193,8 @@ func (mi *ModuleInstance) Breakpoint(location sobek.Value) {
 	} else {
 		mi.bpm.RequestPauseAll()
 	}
-	mi.bpm.Pause(mi.vu.Context(), mi.vuID, file, line, scopeID, true)
+	depth, fn := callDepth(rt)
+	mi.bpm.PauseAt(mi.vu.Context(), mi.vuID, PausePoint{
+		File: file, Line: line, Scope: scopeID, Depth: depth, Func: fn, Reason: "breakpoint",
+	}, true)
 }

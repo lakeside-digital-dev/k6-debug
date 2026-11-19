@@ -187,14 +187,40 @@ module.exports = function ({ types: t }) {
 
       // Track function scopes
       'FunctionDeclaration|FunctionExpression|ArrowFunctionExpression': {
-        enter(path) {
+        enter(path, state) {
           const body = path.node.body;
           if (!t.isBlockStatement(body)) return;
           const id = nextScopeId++;
           const parentId = currentScope();
           scopeStack.push(id);
           path.setData('_debugScopeId', id);
-          path.get('body').unshiftContainer('body', buildEnterScope(id, parentId));
+
+          // Capture function parameters (e.g. `data` returned by setup())
+          // right after entering the scope, so they show up as variables.
+          const filename =
+            state.filename || state.file.opts.filename || 'unknown';
+          const paramCaptures = [];
+          const seen = new Set();
+          for (const param of path.node.params) {
+            let names = {};
+            try {
+              names = t.getBindingIdentifiers(
+                t.isTSParameterProperty(param) ? param.parameter : param
+              );
+            } catch (e) {
+              names = {};
+            }
+            for (const name of Object.keys(names)) {
+              if (name === 'this' || seen.has(name)) continue;
+              seen.add(name);
+              const loc = names[name].loc || param.loc || path.node.loc;
+              if (loc) paramCaptures.push(buildCapture(name, loc, filename));
+            }
+          }
+
+          path
+            .get('body')
+            .unshiftContainer('body', [buildEnterScope(id, parentId), ...paramCaptures]);
         },
         exit(path) {
           if (!t.isBlockStatement(path.node.body)) return;

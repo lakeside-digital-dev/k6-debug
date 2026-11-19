@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -20,8 +19,10 @@ const (
 	ActionContinue ResumeAction = iota
 	// ActionNext steps to the next instrumented statement (behaves like continue for now).
 	ActionNext
-	// ActionStepIn steps into the next instrumented statement (behaves like continue for now).
+	// ActionStepIn stops at the next instrumented statement, including inside called functions.
 	ActionStepIn
+	// ActionStepOut stops at the first instrumented statement after the current function returned.
+	ActionStepOut
 )
 
 // ScopedVariable pairs a captured value with its lexical scope ID.
@@ -36,10 +37,13 @@ type VUDebugState struct {
 	Paused     bool
 	PauseLine  int
 	PauseFile  string
-	PauseScope int                        // scope ID at the pause point
-	Variables  map[string]ScopedVariable   // variable name → scoped value
-	VarOrder   []string                   // insertion order of variable names
-	LastAction ResumeAction               // the action that last resumed this VU
+	PauseScope int                       // scope ID at the pause point
+	PauseDepth int                       // JS call stack depth at the pause point
+	PauseFunc  string                    // JS function name at the pause point
+	StopReason string                    // "breakpoint" or "step"
+	Variables  map[string]ScopedVariable // variable name → scoped value
+	VarOrder   []string                  // insertion order of variable names
+	LastAction ResumeAction              // the action that last resumed this VU
 }
 
 // BreakpointManager manages breakpoints and per-VU debug state.
@@ -47,13 +51,13 @@ type BreakpointManager struct {
 	mu           sync.RWMutex
 	breakpoints  map[string]map[int]bool // file → line → enabled
 	vuStates     map[uint64]*VUDebugState
-	scopeParents map[int]int             // scopeID → parentScopeID (shared across VUs)
-	disconnected bool                    // set when DAP client disconnects; prevents future pauses
-	allStopped   bool                    // true when all VUs should stop at next instrumented statement
-	stopClaimed  bool                    // true when a VU has already sent the stopped event for this round
+	scopeParents map[int]int // scopeID → parentScopeID (shared across VUs)
+	disconnected bool        // set when DAP client disconnects; prevents future pauses
+	allStopped   bool        // true when all VUs should stop at next instrumented statement
+	stopClaimed  bool        // true when a VU has already sent the stopped event for this round
 
 	// Callbacks for DAP events
-	onStopped func(vuID uint64, file string, line int)
+	onStopped func(vuID uint64, file string, line int, reason string)
 	onThread  func(vuID uint64, reason string) // "started" or "exited"
 }
 
@@ -67,7 +71,7 @@ func NewBreakpointManager() *BreakpointManager {
 }
 
 // SetOnStopped sets a callback invoked when a VU pauses at a breakpoint.
-func (bm *BreakpointManager) SetOnStopped(fn func(vuID uint64, file string, line int)) {
+func (bm *BreakpointManager) SetOnStopped(fn func(vuID uint64, file string, line int, reason string)) {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
 	bm.onStopped = fn
@@ -84,7 +88,7 @@ func (bm *BreakpointManager) SetOnThread(fn func(vuID uint64, reason string)) {
 func (bm *BreakpointManager) SetBreakpoints(file string, lines []int) {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
-	log.Printf("[k6-debug] SetBreakpoints: file=%q lines=%v (current breakpoints: %v)", file, lines, bm.breakpoints)
+	verbosef("[k6-debug] SetBreakpoints: file=%q lines=%v (current breakpoints: %v)", file, lines, bm.breakpoints)
 	if len(lines) == 0 {
 		delete(bm.breakpoints, file)
 		return
@@ -257,6 +261,23 @@ func (bm *BreakpointManager) SetDisconnected() {
 // If another VU already triggered the stop, this VU pauses silently.
 // Returns the resume action taken, or ActionContinue if context was cancelled.
 func (bm *BreakpointManager) Pause(ctx context.Context, vuID uint64, file string, line int, scopeID int, notify bool) ResumeAction {
+	return bm.PauseAt(ctx, vuID, PausePoint{File: file, Line: line, Scope: scopeID, Reason: "breakpoint"}, notify)
+}
+
+// PausePoint describes where a VU pauses.
+type PausePoint struct {
+	File   string
+	Line   int
+	Scope  int
+	Depth  int
+	Func   string
+	Reason string
+}
+
+// PauseAt is Pause with call-stack depth and function name, which enable
+// step over / step out and a named stack frame.
+func (bm *BreakpointManager) PauseAt(ctx context.Context, vuID uint64, p PausePoint, notify bool) ResumeAction {
+	file, line, scopeID := p.File, p.Line, p.Scope
 	bm.mu.Lock()
 	if bm.disconnected {
 		bm.mu.Unlock()
@@ -271,6 +292,9 @@ func (bm *BreakpointManager) Pause(ctx context.Context, vuID uint64, file string
 	state.PauseLine = line
 	state.PauseFile = file
 	state.PauseScope = scopeID
+	state.PauseDepth = p.Depth
+	state.PauseFunc = p.Func
+	state.StopReason = p.Reason
 
 	// Only the first VU to stop in a round sends the stopped event.
 	// If stopClaimed is already true, another VU already sent the event.
@@ -282,7 +306,7 @@ func (bm *BreakpointManager) Pause(ctx context.Context, vuID uint64, file string
 	bm.mu.Unlock()
 
 	if shouldNotify && onStopped != nil {
-		onStopped(vuID, file, line)
+		onStopped(vuID, file, line, p.Reason)
 	}
 
 	select {
@@ -356,29 +380,57 @@ func (bm *BreakpointManager) ShouldPauseAll(vuID uint64) bool {
 	if !ok || state.Paused {
 		return false
 	}
+	// The VU that is currently stepping is driven by ShouldStepPauseAt only;
+	// otherwise e.g. step over would stop silently inside a called function.
+	switch state.LastAction {
+	case ActionNext, ActionStepIn, ActionStepOut:
+		return false
+	}
 	return true
 }
 
-// ShouldStepPause checks if the VU should pause due to a pending step (next/stepIn).
-// It only triggers when the current line differs from where the VU was previously paused,
-// so multiple captures on the same source line (e.g. variable + __line marker) don't
-// cause duplicate pauses. Clears the stepping flag when it returns true.
+// ShouldStepPause checks if the VU should pause due to a pending step,
+// ignoring call depth (kept for compatibility; see ShouldStepPauseAt).
 func (bm *BreakpointManager) ShouldStepPause(vuID uint64, line int) bool {
+	return bm.ShouldStepPauseAt(vuID, line, -1)
+}
+
+// ShouldStepPauseAt checks if the VU should pause due to a pending step.
+// depth is the current JS call stack depth (-1 = unknown):
+//   - next (step over): pause on a different line at the same or a shallower depth
+//   - stepIn: pause on any other line or depth
+//   - stepOut: pause once the depth is shallower than at the pause point
+//
+// Clears the stepping flag when it returns true.
+func (bm *BreakpointManager) ShouldStepPauseAt(vuID uint64, line int, depth int) bool {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
 	state, ok := bm.vuStates[vuID]
 	if !ok {
 		return false
 	}
-	if state.LastAction == ActionNext || state.LastAction == ActionStepIn {
-		// Still on the same line as the previous pause — don't stop yet.
-		if line == state.PauseLine {
-			return false
+	known := depth >= 0 && state.PauseDepth > 0
+	pause := false
+	switch state.LastAction {
+	case ActionNext:
+		if known {
+			pause = depth < state.PauseDepth || (depth == state.PauseDepth && line != state.PauseLine)
+		} else {
+			pause = line != state.PauseLine
 		}
-		state.LastAction = ActionContinue
-		return true
+	case ActionStepIn:
+		pause = line != state.PauseLine || (known && depth != state.PauseDepth)
+	case ActionStepOut:
+		if known {
+			pause = depth < state.PauseDepth
+		} else {
+			pause = line != state.PauseLine
+		}
 	}
-	return false
+	if pause {
+		state.LastAction = ActionContinue
+	}
+	return pause
 }
 
 // IsSteppingOver returns true if the VU is currently in a step operation and
@@ -391,7 +443,11 @@ func (bm *BreakpointManager) IsSteppingOver(vuID uint64, line int) bool {
 	if !ok {
 		return false
 	}
-	return (state.LastAction == ActionNext || state.LastAction == ActionStepIn) && line == state.PauseLine
+	switch state.LastAction {
+	case ActionNext, ActionStepIn, ActionStepOut:
+		return line == state.PauseLine
+	}
+	return false
 }
 
 // GetVUState returns the debug state for a VU.

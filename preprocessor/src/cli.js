@@ -2,10 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const parser = require('@babel/parser');
-const traverse = require('@babel/traverse').default;
-const generate = require('@babel/generator').default;
-const plugin = require('./plugin');
+const { instrument } = require('./instrument');
 
 function usage() {
   console.error(
@@ -46,30 +43,7 @@ function main() {
 
   const source = fs.readFileSync(inputFile, 'utf-8');
   const filename = path.resolve(inputFile);
-
-  // Parse
-  const ast = parser.parse(source, {
-    sourceType: 'module',
-    plugins: ['dynamicImport'],
-    sourceFilename: filename,
-  });
-
-  // Create plugin instance with state
-  const pluginInstance = plugin({ types: require('@babel/types') });
-
-  // Traverse with plugin visitors
-  traverse(ast, pluginInstance.visitor, undefined, {
-    filename: filename,
-    file: { opts: { filename: filename } },
-  });
-
-  // Generate
-  const generateOpts = {
-    sourceMaps: sourceMaps ? 'inline' : false,
-    sourceFileName: filename,
-    retainLines: true,
-  };
-  const output = generate(ast, generateOpts, source);
+  const output = { code: instrument(source, filename, { sourceMaps }) };
 
   if (outputFile) {
     fs.writeFileSync(outputFile, output.code, 'utf-8');

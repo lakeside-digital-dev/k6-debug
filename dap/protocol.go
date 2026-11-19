@@ -122,6 +122,8 @@ func NewEvent(event string, body any) *Message {
 type Capabilities struct {
 	SupportsConfigurationDoneRequest bool `json:"supportsConfigurationDoneRequest"`
 	SupportsFunctionBreakpoints      bool `json:"supportsFunctionBreakpoints"`
+	SupportsEvaluateForHovers        bool `json:"supportsEvaluateForHovers"`
+	SupportsTerminateRequest         bool `json:"supportsTerminateRequest"`
 }
 
 // Thread represents a DAP thread (maps to a k6 VU).
@@ -234,4 +236,18 @@ type SourceArguments struct {
 type SourceBody struct {
 	Content  string `json:"content"`
 	MimeType string `json:"mimeType,omitempty"`
+}
+
+// EvaluateArguments holds arguments for evaluate request.
+type EvaluateArguments struct {
+	Expression string `json:"expression"`
+	FrameID    int    `json:"frameId"`
+	Context    string `json:"context,omitempty"`
+}
+
+// EvaluateBody is the body of an evaluate response.
+type EvaluateBody struct {
+	Result             string `json:"result"`
+	Type               string `json:"type,omitempty"`
+	VariablesReference int    `json:"variablesReference"`
 }
