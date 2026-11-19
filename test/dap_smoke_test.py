@@ -147,15 +147,15 @@ def main_step_in(binary):
     req("configurationDone")
     tid = wait(lambda m: m.get("event") == "stopped")["body"]["threadId"]
     req("stepIn", {"threadId": tid})
-    fr = line_after_stop(tid)
-    assert fr["line"] == IN_BUILD_URL and fr["name"].startswith("buildUrl"), fr
+    inner = line_after_stop(tid)
+    assert inner["line"] == IN_BUILD_URL and inner["name"].startswith("buildUrl"), inner
     req("stepOut", {"threadId": tid})
     fr = line_after_stop(tid)
     assert fr["line"] == AFTER_BP, fr
     req("disconnect")
     proc.wait(timeout=60)
     assert proc.returncode == 0, proc.returncode
-    print("PASS: step in -> %s line %d, step out -> line %d" % (fr["name"], IN_BUILD_URL, AFTER_BP))
+    print("PASS: step in -> %s line %d, step out -> %s line %d" % (inner["name"], IN_BUILD_URL, fr["name"], AFTER_BP))
 
 
 if __name__ == "__main__":
